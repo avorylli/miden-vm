@@ -1,7 +1,7 @@
 use std::{fs, path::Path, sync::Arc};
 
 use miden_assembly::{
-    DefaultSourceManager,
+    Assembler, DefaultSourceManager, KernelLibrary, Library,
     diagnostics::{IntoDiagnostic, Report, WrapErr},
 };
 use miden_mast_package::{MastArtifact, Package};
@@ -31,9 +31,56 @@ pub fn get_masm_program(
     libraries: &Libraries,
     debug_on: bool,
 ) -> Result<(miden_core::Program, Arc<DefaultSourceManager>), Report> {
+    get_masm_program_with_kernel(path, libraries, debug_on, None)
+}
+
+/// Returns a `Program` type from a `.masm` assembly file, optionally with a kernel.
+pub fn get_masm_program_with_kernel(
+    path: &Path,
+    libraries: &Libraries,
+    debug_on: bool,
+    kernel: Option<&KernelLibrary>,
+) -> Result<(miden_core::Program, Arc<DefaultSourceManager>), Report> {
     let debug_mode = if debug_on { Debug::On } else { Debug::Off };
     let program_file = ProgramFile::read(path)?;
-    let program = program_file.compile(debug_mode, &libraries.libraries)?;
+    let program = program_file.compile_with_kernel(debug_mode, &libraries.libraries, kernel)?;
 
     Ok((program, program_file.source_manager().clone()))
+}
+
+/// Loads a kernel library from a file path. Supports both .masm and .masl files.
+pub fn get_kernel_library(path: &Path, debug_on: bool) -> Result<KernelLibrary, Report> {
+    if !path.is_file() {
+        return Err(Report::msg(format!("Kernel file `{}` must be a file", path.display())));
+    }
+
+    let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
+
+    match ext.as_str() {
+        "masl" => {
+            // Load from compiled library file
+            let library =
+                Library::deserialize_from_file(path).into_diagnostic().wrap_err_with(|| {
+                    format!("Failed to read kernel library from `{}`", path.display())
+                })?;
+            KernelLibrary::try_from(library).map_err(|e| {
+                Report::msg(format!("Failed to convert library to kernel library: {e}"))
+            })
+        },
+        "masm" => {
+            // Compile from source
+            let source_manager = Arc::new(DefaultSourceManager::default());
+            let mut assembler = Assembler::new(source_manager).with_debug_mode(debug_on);
+            assembler
+                .link_dynamic_library(miden_stdlib::StdLibrary::default())
+                .wrap_err("Failed to load stdlib")?;
+            assembler
+                .assemble_kernel(path)
+                .wrap_err_with(|| format!("Failed to compile kernel from `{}`", path.display()))
+        },
+        _ => Err(Report::msg(format!(
+            "Kernel file must have a .masm or .masl extension, got `{}`",
+            path.display()
+        ))),
+    }
 }
