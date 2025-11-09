@@ -9,7 +9,7 @@ use tracing::instrument;
 
 use super::{
     data::{Libraries, OutputFile},
-    utils::{get_masm_program, get_masp_program},
+    utils::{get_kernel_library, get_masm_program_with_kernel, get_masp_program},
 };
 
 #[derive(Debug, Clone, Parser)]
@@ -50,6 +50,10 @@ pub struct RunCmd {
     /// Disable debug instructions (release mode)
     #[arg(short = 'r', long = "release")]
     release: bool,
+
+    /// Path to a kernel file (.masm or .masl)
+    #[arg(long = "kernel", value_parser)]
+    kernel_file: Option<PathBuf>,
 }
 
 impl RunCmd {
@@ -68,10 +72,17 @@ impl RunCmd {
 
         let now = Instant::now();
 
+        // load kernel if provided
+        let kernel = if let Some(kernel_path) = &self.kernel_file {
+            Some(get_kernel_library(kernel_path, !self.release)?)
+        } else {
+            None
+        };
+
         // use a single match expression based on file extension
         let (trace, program_hash) = match ext.as_str() {
-            "masp" => run_masp_program(self)?,
-            "masm" => run_masm_program(self)?,
+            "masp" => run_masp_program(self, kernel.as_ref())?,
+            "masm" => run_masm_program(self, kernel.as_ref())?,
             _ => return Err(Report::msg("The provided file must have a .masm or .masp extension")),
         };
 
@@ -124,7 +135,10 @@ impl RunCmd {
 // ================================================================================================
 
 #[instrument(name = "run_program", skip_all)]
-fn run_masp_program(params: &RunCmd) -> Result<(ExecutionTrace, [u8; 32]), Report> {
+fn run_masp_program(
+    params: &RunCmd,
+    kernel: Option<&miden_assembly::KernelLibrary>,
+) -> Result<(ExecutionTrace, [u8; 32]), Report> {
     let program = get_masp_program(&params.program_file)?;
 
     // use simplified input data reading
@@ -133,6 +147,13 @@ fn run_masp_program(params: &RunCmd) -> Result<(ExecutionTrace, [u8; 32]), Repor
     let stack_inputs = input_data.parse_stack_inputs().map_err(Report::msg)?;
     let advice_inputs = input_data.parse_advice_inputs().map_err(Report::msg)?;
     let mut host = DefaultHost::default().with_library(&StdLibrary::default())?;
+
+    // load kernel library into host if provided
+    if let Some(kernel_lib) = kernel {
+        host.load_library(kernel_lib.mast_forest())
+            .into_diagnostic()
+            .wrap_err("Failed to load kernel library")?;
+    }
 
     let execution_options = ExecutionOptions::new(
         Some(params.max_cycles),
@@ -158,7 +179,10 @@ fn run_masp_program(params: &RunCmd) -> Result<(ExecutionTrace, [u8; 32]), Repor
 }
 
 #[instrument(name = "run_program", skip_all)]
-fn run_masm_program(params: &RunCmd) -> Result<(ExecutionTrace, [u8; 32]), Report> {
+fn run_masm_program(
+    params: &RunCmd,
+    kernel: Option<&miden_assembly::KernelLibrary>,
+) -> Result<(ExecutionTrace, [u8; 32]), Report> {
     for lib in &params.library_paths {
         if !lib.is_file() {
             let name = lib.display();
@@ -171,7 +195,7 @@ fn run_masm_program(params: &RunCmd) -> Result<(ExecutionTrace, [u8; 32]), Repor
 
     // load program from file and compile
     let (program, source_manager) =
-        get_masm_program(&params.program_file, &libraries, !params.release)?;
+        get_masm_program_with_kernel(&params.program_file, &libraries, !params.release, kernel)?;
     let input_data = InputFile::read(&params.input_file, &params.program_file)?;
 
     let execution_options = ExecutionOptions::new(
@@ -193,6 +217,13 @@ fn run_masm_program(params: &RunCmd) -> Result<(ExecutionTrace, [u8; 32]), Repor
         host.load_library(lib.mast_forest())
             .into_diagnostic()
             .wrap_err("Failed to load library")?;
+    }
+
+    // load kernel library into host if provided
+    if let Some(kernel_lib) = kernel {
+        host.load_library(kernel_lib.mast_forest())
+            .into_diagnostic()
+            .wrap_err("Failed to load kernel library")?;
     }
 
     let program_hash: [u8; 32] = program.hash().into();
