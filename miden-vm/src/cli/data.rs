@@ -6,7 +6,7 @@ use std::{
 };
 
 use miden_assembly::{
-    Assembler, DefaultSourceManager, Library, LibraryNamespace, SourceManager,
+    Assembler, DefaultSourceManager, KernelLibrary, Library, LibraryNamespace, SourceManager,
     ast::{Module, ModuleKind},
     diagnostics::{Report, WrapErr},
     report,
@@ -150,9 +150,28 @@ where
     where
         I: IntoIterator<Item = &'a Library>,
     {
+        self.compile_with_kernel(debug, libraries, None)
+    }
+
+    /// Compiles this program file into a [Program], optionally with a kernel.
+    #[instrument(name = "compile_program_with_kernel", skip_all)]
+    pub fn compile_with_kernel<'a, I>(
+        &self,
+        debug: Debug,
+        libraries: I,
+        kernel: Option<&KernelLibrary>,
+    ) -> Result<Program, Report>
+    where
+        I: IntoIterator<Item = &'a Library>,
+    {
         // compile program
-        let mut assembler =
-            Assembler::new(self.source_manager.clone()).with_debug_mode(debug.is_on());
+        let mut assembler = if let Some(kernel_lib) = kernel {
+            Assembler::with_kernel(self.source_manager.clone(), kernel_lib.clone())
+                .with_debug_mode(debug.is_on())
+        } else {
+            Assembler::new(self.source_manager.clone()).with_debug_mode(debug.is_on())
+        };
+
         assembler
             .link_dynamic_library(StdLibrary::default())
             .wrap_err("Failed to load stdlib")?;
